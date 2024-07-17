@@ -25,6 +25,140 @@ import cupy as cp
 import warnings
 
 
+def pubo_serial_rfplusoffset(arch, config, params):
+    # get parameters. This should be "fixed values"
+    # max runs is the number of parallel initialization (different inputs)
+    max_runs = params.get("max_runs", 100)
+    # max_flips is the maximum number of iterations
+    max_flips = params.get("max_flips", 1000)
+
+
+    pxb = arch[0]
+    axb = arch[1]
+    axb_scales = cp.tile(arch[2], (max_runs,1)).T
+    w1 = cp.tile(arch[3], (max_runs,1)).T
+    w0 = arch[4]
+    ups = arch[5]
+    dns = arch[6]
+
+    def beta(t):
+        # annealing_schedule_type = config.get("annealing_schedule_type", "exp")
+        beta0 = config.get("beta0", 0.1)
+        r_beta = config.get("r_beta", 1e-6)
+        return beta0 * np.exp(r_beta*t)
+
+    Delta_Eo = config.get("Delta_Eo", 0.5)
+
+    num_vars = pxb.shape[0]
+
+    state = cp.random.randint(2, size=(max_runs, num_vars)).astype(cp.float32)
+    frozen = cp.zeros(max_runs, dtype="bool")
+    Eo = cp.zeros(state.shape, dtype=cp.float32)
+    # tracks the amount of iteratiosn that are actually completed
+    n_iters = 0
+
+    # note, to speed up the code violated_constr_mat does not represent the violated constraints but the unsatisfied variables. It doesn't matter for the overall computation of p_vs_t
+    violated_constr_mat = cp.full((max_runs, max_flips), cp.nan, dtype=cp.float32)
+
+    for it in range(max_flips):
+        n_iters += 1
+
+        gr = (pxb @ (axb @ state.T >= axb_scales) + w1).T
+        alpha = np.sqrt(2/np.pi) / beta(n_iters)
+        next_cands = (gr + Eo*(2*state-1)) < (cp.random.randn(*gr.shape) * alpha)
+        flip_cands = next_cands != state
+        samps_flip_cands = cp.random.rand(*flip_cands.shape) * flip_cands
+        idxs_rf_flips = cp.vstack([cp.arange(samps_flip_cands.shape[0]), cp.argmax(samps_flip_cands, axis=1)]).T[~frozen,:]
+        # state[not_frozen,:][idxs_backup_flips] = next_cands[not_frozen,:][idxs_backup_flips]
+        state[(idxs_rf_flips[:,0],idxs_rf_flips[:,1])] = next_cands[(idxs_rf_flips[:,0],idxs_rf_flips[:,1])]
+
+        flip_this_cycle = cp.any(flip_cands, axis=1)
+        if cp.any(~flip_this_cycle):
+            Eo[~flip_this_cycle,:] += Delta_Eo
+        if cp.any(flip_this_cycle):
+            Eo[flip_this_cycle,:] = 0
+
+        unhappiness = (ups.T @ state.T + dns.T @ (1-state.T))
+        violated = cp.sum(unhappiness == 0, axis=0)
+        violated_constr_mat[:,it] = violated
+        frozen = cp.logical_or(frozen, violated==0)
+        if cp.all(frozen):
+            break
+
+    return violated_constr_mat, n_iters, state
+    
+
+def pubo_parallel_rg(arch, config, params):
+
+    # get parameters. This should be "fixed values"
+    # max runs is the number of parallel initialization (different inputs)
+    max_runs = params.get("max_runs", 100)
+    # max_flips is the maximum number of iterations
+    max_flips = params.get("max_flips", 1000)
+
+
+    pxb = arch[0]
+    axb = arch[1]
+    axb_scales = cp.tile(arch[2], (max_runs,1)).T
+    w1 = cp.tile(arch[3], (max_runs,1)).T
+    w0 = arch[4]
+    ups = arch[5]
+    dns = arch[6]
+
+    def beta(t):
+        # annealing_schedule_type = config.get("annealing_schedule_type", "exp")
+        beta0 = config.get("beta0", 0.1)
+        r_beta = config.get("r_beta", 1e-6)
+        return beta0 * np.exp(r_beta*t)
+
+    def p(t):
+        p0 = config.get("p0", 1.0)
+        rp = config.get("rp", 1e-6)
+        pexp = p0 * np.exp(-rp*t)
+        return pexp
+
+
+    num_vars = pxb.shape[0]
+
+    state = cp.random.randint(2, size=(max_runs, num_vars)).astype(cp.float32)
+    frozen = cp.zeros(max_runs, dtype="bool")
+    # tracks the amount of iteratiosn that are actually completed
+    n_iters = 0
+
+    # note, to speed up the code violated_constr_mat does not represent the violated constraints but the unsatisfied variables. It doesn't matter for the overall computation of p_vs_t
+    violated_constr_mat = cp.full((max_runs, max_flips), cp.nan, dtype=cp.float32)
+
+    for it in range(max_flips):
+        n_iters += 1
+
+        gr = (pxb @ (axb @ state.T >= axb_scales) + w1).T
+        alpha = np.sqrt(2/np.pi) / beta(it)
+        next_cands = gr < (cp.random.randn(*gr.shape) * alpha)
+        flip_cands = next_cands != state
+        neighborhoods = cp.logical_and((cp.random.rand(*state.shape) < np.clip(p(it), 0, 1)).T, ~frozen).T
+        # state[not_frozen,:][neighborhoods[not_frozen,:]] = next_cands[not_frozen,:][neighborhoods[not_frozen,:]]
+        state[neighborhoods] = next_cands[neighborhoods]
+        real_flip_in_grp = cp.any(flip_cands * neighborhoods, axis=1)
+        # flip_cands_idxs = cp.argwhere(flip_cands)
+        # idxs_backup_flips = flip_cands_idxs[cp.trunc(
+        #     cp.random.rand(len(real_flip_in_grp)) * cp.sum(flip_cands, axis=1)
+        # ).astype(cp.int32)][~real_flip_in_grp]
+        # samps_flip_cands = cp.random.rand(*flip_cands[not_frozen,:].shape) * flip_cands
+        samps_flip_cands = cp.random.rand(*flip_cands.shape) * flip_cands
+        idxs_backup_flips = cp.vstack([cp.arange(samps_flip_cands.shape[0]), cp.argmax(samps_flip_cands, axis=1)]).T[cp.logical_and(~real_flip_in_grp, ~frozen),:]
+        # state[not_frozen,:][idxs_backup_flips] = next_cands[not_frozen,:][idxs_backup_flips]
+        state[idxs_backup_flips] = next_cands[idxs_backup_flips]
+
+        unhappiness = (ups.T @ state.T + dns.T @ (1-state.T))
+        violated = cp.sum(unhappiness == 0, axis=0)
+        violated_constr_mat[:,it] = violated
+        frozen = cp.logical_or(frozen, violated==0)
+        if cp.all(frozen):
+            break
+
+    return violated_constr_mat, n_iters, state
+
+
 def walksat_m(architecture, config, params):
 
     tcam = architecture[0]

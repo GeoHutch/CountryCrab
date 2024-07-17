@@ -24,6 +24,11 @@ import itertools
 import cupy as cp
 import os
 
+from operator import mul
+from functools import reduce
+
+from countrycrab.util import DoCMultivariatePolynomial, DoPMultivariateMonomial, NDSparseMatrix
+
 def load_clauses_from_cnf(file_path: str) -> t.List[t.List[int]]:
     with open(file_path, 'r') as file:
         lines = file.readlines()
@@ -46,6 +51,69 @@ def count_variables(list_of_lists):
     largest_integer = max(flattened_list)
     # Return the largest integer. This in the feature can be changed to the actual number of variables
     return largest_integer
+
+def compile_pubo(config: t.Dict, params: t.Dict) -> t.Union[t.Dict, t.Tuple]:
+    instance_name = config["instance"]
+    clauses_list = load_clauses_from_cnf(instance_name)
+
+    clauses = len(clauses_list)
+    variables = count_variables(clauses_list)
+    def clause2poly(clause):
+        idxs = [abs(lit)-1 for lit in clause]
+        ss = [np.sign(lit) for lit in clause]
+        def lit2factor(i, cmi):
+            consttk = DoPMultivariateMonomial({})
+            consttv = (1+cmi)/2
+            ltk = DoPMultivariateMonomial({i:1})
+            ltv = -cmi
+            return DoCMultivariatePolynomial(
+                {consttk: consttv, ltk: ltv}
+            )
+        factors = [lit2factor(idx, s) for (idx, s) in zip(idxs, ss)]
+        return reduce(mul, factors)
+    p = sum(map(clause2poly, clauses_list), start=DoCMultivariatePolynomial.additive_identity())
+
+    ups = np.zeros((variables, clauses))
+    dns = np.zeros((variables, clauses))
+    for (m,clause) in enumerate(clauses_list):
+        for lit in clause:
+            if lit > 0:
+                ups[abs(lit)-1,m] = 1
+            elif lit < 0:
+                dns[abs(lit)-1,m] = 1
+        
+    
+    pxb = NDSparseMatrix(2)
+    axb = NDSparseMatrix(2)
+    axb_scales = NDSparseMatrix(1)
+    bias = NDSparseMatrix(1)
+    offset = NDSparseMatrix(0)
+
+    current_idx = 0
+    axb_monomials = dict()
+    for m, c in p.terms():
+        if m.degree()==0:
+            offset[()] += c
+        elif m.degree() == 1:
+            bias[m.to_index()[0]] += c
+        else:
+            derivative_monomial_pairs = [(frozenset(m.to_index())-{i},i) for i in m.to_index()]
+            for dm,idm in derivative_monomial_pairs:
+                if dm in axb_monomials:
+                    k = axb_monomials[dm]
+                else:
+                    k = current_idx
+                    axb_monomials[dm] = current_idx
+                    current_idx += 1
+                    for i in dm:
+                        axb[k,i] = 1
+                    axb_scales[k] = len(dm)
+                pxb[idm,k] += c
+    arch = [pxb.todense(), axb.todense(), axb_scales.todense(), bias.todense(), offset.todense(), ups, dns]
+ 
+    params['variables'] = variables
+    params['clauses'] = clauses
+    return list(map(lambda m: cp.asarray(m, dtype=cp.float32), arch)), params
 
 def compile_walksat_m(config: t.Dict, params: t.Dict) -> t.Union[t.Dict, t.Tuple]:
     

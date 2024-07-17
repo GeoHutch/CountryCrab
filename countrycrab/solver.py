@@ -21,9 +21,9 @@ import typing as t
 import json
 
 
-from countrycrab.compiler import compile_walksat_m, compile_walksat_g
+from countrycrab.compiler import compile_walksat_m, compile_walksat_g, compile_pubo
 from countrycrab.analyze import vector_its
-from countrycrab.heuristics import walksat_m, walksat_g, walksat_skc, walksat_b
+from countrycrab.heuristics import walksat_m, walksat_g, walksat_skc, walksat_b, pubo_parallel_rg, pubo_serial_rfplusoffset
 
 import cupy as cp
 
@@ -45,7 +45,8 @@ def solve(config: t.Dict, params: t.Dict) -> t.Union[t.Dict, t.Tuple]:
     compiler_name = config.get("compiler", 'compile_walksat_m')
     compilers_dict = {
         'compile_walksat_m': compile_walksat_m,
-        'compile_walksat_g': compile_walksat_g
+        'compile_walksat_g': compile_walksat_g,
+        'compile_pubo': compile_pubo,
     }
     compiler_function = compilers_dict.get(compiler_name)
     architecture, params = compiler_function(config, params)
@@ -71,7 +72,9 @@ def solve(config: t.Dict, params: t.Dict) -> t.Union[t.Dict, t.Tuple]:
         'walksat_m': walksat_m,
         'walksat_g': walksat_g,
         'walksat_skc': walksat_skc,
-        'walksat_b': walksat_b
+        'walksat_b': walksat_b,
+        'pubo_parallel_rg': pubo_parallel_rg,
+        'pubo_serial_rfplusoffset': pubo_serial_rfplusoffset,
     }
     heuristic_function = heuristics_dict.get(heuristic_name)
     if heuristic_function is None:
@@ -83,6 +86,8 @@ def solve(config: t.Dict, params: t.Dict) -> t.Union[t.Dict, t.Tuple]:
         'walksat_g' : 'compile_walksat_g',
         'walksat_skc' : 'compile_walksat_g',
         'walksat_b' : 'compile_walksat_g',
+        'pubo_parallel_rg': 'compile_pubo',
+        'pubo_serial_rfplusoffset': 'compile_pubo'
     }
     if compiler_name != heuristic_to_compiler.get(heuristic_name):
         raise ValueError(f"Compiler {compiler_name} is not compatible with heuristic {heuristic_name}")
