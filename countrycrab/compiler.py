@@ -52,7 +52,7 @@ def count_variables(list_of_lists):
     # Return the largest integer. This in the feature can be changed to the actual number of variables
     return largest_integer
 
-def compile_pubo(config: t.Dict, params: t.Dict) -> t.Union[t.Dict, t.Tuple]:
+def compile_pubo_dpgrad_pmbenergy(config: t.Dict, params: t.Dict) -> t.Union[t.Dict, t.Tuple]:
     instance_name = config["instance"]
     clauses_list = load_clauses_from_cnf(instance_name)
 
